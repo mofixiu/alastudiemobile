@@ -20,6 +20,22 @@ class NearbyStudyScreen extends StatefulWidget {
 class _NearbyStudyScreenState extends State<NearbyStudyScreen> {
   final service = NearbySessionService.instance;
   final _chatInput = TextEditingController();
+  bool _hasSavedHost = false;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_restoreLocalSession());
+  }
+
+  Future<void> _restoreLocalSession() async {
+    final hostAvailable = await service.hasSavedHostSnapshot;
+    if (hostAvailable) {
+      if (mounted) setState(() => _hasSavedHost = true);
+    } else {
+      await service.restoreSavedGuest();
+    }
+  }
 
   @override
   void dispose() {
@@ -45,7 +61,7 @@ class _NearbyStudyScreenState extends State<NearbyStudyScreen> {
               ),
               const SizedBox(height: 8),
               const Text(
-                'The host’s screen keeps the live session. This offline table will not sync to your account.',
+                'The group chat is discarded when the table ends. If you are signed in, a private focus summary will sync when the backend is reachable.',
               ),
               const SizedBox(height: 17),
               Row(
@@ -66,6 +82,8 @@ class _NearbyStudyScreenState extends State<NearbyStudyScreen> {
         ),
       );
       if (leave != true || !mounted) return;
+      final summary = service.summary();
+      await context.read<AppController>().recordNearbySummary(summary);
       await service.closeSession();
     } else if (service.isDiscovering) {
       await service.stopScanning();
@@ -248,6 +266,19 @@ class _NearbyStudyScreenState extends State<NearbyStudyScreen> {
         titleSize: 36,
         titleWidthFactor: .75,
       ),
+      if (_hasSavedHost && !service.isHosting) ...[
+        const SizedBox(height: 10),
+        OutlinedButton.icon(
+          onPressed: service.busy
+              ? null
+              : () async {
+                  final resumed = await service.resumeSavedHost();
+                  if (resumed && mounted) setState(() => _hasSavedHost = false);
+                },
+          icon: const AppIcon(Icons.restart_alt_rounded, size: 17),
+          label: const Text('Resume your nearby table'),
+        ),
+      ],
       const SizedBox(height: 16),
       SoftPanel(
         color: context.appSurface,
@@ -344,7 +375,7 @@ class _NearbyStudyScreenState extends State<NearbyStudyScreen> {
           ),
       const SizedBox(height: 12),
       Text(
-        'Nearby sessions are temporary. They are not added to online room history or synced later.',
+        'Nearby chat stays on these devices and is discarded at session end. A private focus summary can sync to your account when you are online.',
         style: TextStyle(color: context.appMuted, fontSize: 11, height: 1.4),
       ),
     ],
@@ -420,6 +451,48 @@ class _NearbyStudyScreenState extends State<NearbyStudyScreen> {
         ),
         const SizedBox(height: 18),
         _timerPanel(phase, status, '$minutes:$seconds', progress),
+        if (!service.isHost && !service.isConnected) ...[
+          const SizedBox(height: 11),
+          SoftPanel(
+            color: context.appBrandPanel,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Eyebrow('CONNECTION PAUSED'),
+                const SizedBox(height: 4),
+                const Text(
+                  'Reconnect to the same host',
+                  style: TextStyle(fontWeight: FontWeight.w900),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  'Your saved timer, people, messages and tasks stay on this device until the host sends the current snapshot.',
+                  style: TextStyle(color: context.appMuted, fontSize: 11),
+                ),
+                const SizedBox(height: 7),
+                FilledButton.icon(
+                  onPressed: service.busy
+                      ? null
+                      : () => service.isDiscovering
+                            ? service.stopScanning()
+                            : service.startScanning(),
+                  icon: AppIcon(
+                    service.isDiscovering
+                        ? Icons.stop_rounded
+                        : Icons.bluetooth_searching_rounded,
+                    size: 15,
+                  ),
+                  label: Text(
+                    service.isDiscovering
+                        ? 'Stop scanning'
+                        : 'Scan for the same host',
+                  ),
+                ),
+                for (final item in service.discoveries) _discoveryTile(item),
+              ],
+            ),
+          ),
+        ],
         const SizedBox(height: 19),
         Row(
           children: [
@@ -477,7 +550,9 @@ class _NearbyStudyScreenState extends State<NearbyStudyScreen> {
           children: [
             const Expanded(child: SectionHeading('Shared next steps')),
             TextButton.icon(
-              onPressed: _addTask,
+              onPressed: (!service.isConnected && !service.isHost)
+                  ? null
+                  : _addTask,
               icon: const AppIcon(Icons.add_rounded),
               label: const Text('Add task'),
             ),
@@ -492,9 +567,15 @@ class _NearbyStudyScreenState extends State<NearbyStudyScreen> {
           )
         else
           for (final task in service.tasks)
-            Padding(
-              padding: const EdgeInsets.only(bottom: 8),
-              child: _taskTile(task),
+            IgnorePointer(
+              ignoring: !service.isConnected && !service.isHost,
+              child: Opacity(
+                opacity: (!service.isConnected && !service.isHost) ? .55 : 1,
+                child: Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: _taskTile(task),
+                ),
+              ),
             ),
         const SizedBox(height: 15),
         const SectionHeading('Room chat'),
@@ -705,6 +786,7 @@ class _NearbyStudyScreenState extends State<NearbyStudyScreen> {
             Expanded(
               child: TextField(
                 controller: _chatInput,
+                enabled: service.isConnected || service.isHost,
                 textInputAction: TextInputAction.send,
                 maxLength: 240,
                 decoration: const InputDecoration(
@@ -716,7 +798,9 @@ class _NearbyStudyScreenState extends State<NearbyStudyScreen> {
             ),
             const SizedBox(width: 7),
             IconButton.filled(
-              onPressed: _sendChat,
+              onPressed: (service.isConnected || service.isHost)
+                  ? _sendChat
+                  : null,
               icon: const AppIcon(Icons.arrow_upward_rounded),
               tooltip: 'Send message',
             ),

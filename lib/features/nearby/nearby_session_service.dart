@@ -7,6 +7,8 @@ import 'dart:typed_data';
 import 'package:bluetooth_low_energy/bluetooth_low_energy.dart';
 import 'package:flutter/foundation.dart';
 
+import '../../core/storage/local_store.dart';
+
 class NearbySessionService extends ChangeNotifier {
   NearbySessionService() {
     _central.discovered.listen(_onDiscovered);
@@ -106,37 +108,12 @@ class NearbySessionService extends ChangeNotifier {
       };
       isHost = true;
       isConnected = true;
-      if (_localCharacteristic == null) {
-        _localCharacteristic = GATTCharacteristic.mutable(
-          uuid: characteristicUuid,
-          properties: const [
-            GATTCharacteristicProperty.read,
-            GATTCharacteristicProperty.write,
-            GATTCharacteristicProperty.notify,
-          ],
-          permissions: const [
-            GATTCharacteristicPermission.read,
-            GATTCharacteristicPermission.write,
-          ],
-          descriptors: const [],
-        );
-        _localService = GATTService(
-          uuid: serviceUuid,
-          isPrimary: true,
-          includedServices: const [],
-          characteristics: [_localCharacteristic!],
-        );
-      }
-      await _peripheral.removeAllServices();
-      await _peripheral.addService(_localService!);
-      await _peripheral.startAdvertising(
-        Advertisement(name: 'aLaStudie Nearby', serviceUUIDs: [serviceUuid]),
-      );
-      isHosting = true;
+      await _activateHosting();
       statusMessage =
           'Nearby study table is open. Keep this screen active while people join.';
       errorMessage = null;
       _startTicker();
+      unawaited(_persistSnapshot());
       _broadcastSnapshot();
       notifyListeners();
     } catch (error) {
@@ -148,6 +125,109 @@ class NearbySessionService extends ChangeNotifier {
     } finally {
       _setBusy(false);
     }
+  }
+
+  Future<void> _activateHosting() async {
+    if (_localCharacteristic == null) {
+      _localCharacteristic = GATTCharacteristic.mutable(
+        uuid: characteristicUuid,
+        properties: const [
+          GATTCharacteristicProperty.read,
+          GATTCharacteristicProperty.write,
+          GATTCharacteristicProperty.notify,
+        ],
+        permissions: const [
+          GATTCharacteristicPermission.read,
+          GATTCharacteristicPermission.write,
+        ],
+        descriptors: const [],
+      );
+      _localService = GATTService(
+        uuid: serviceUuid,
+        isPrimary: true,
+        includedServices: const [],
+        characteristics: [_localCharacteristic!],
+      );
+    }
+    await _peripheral.removeAllServices();
+    await _peripheral.addService(_localService!);
+    await _peripheral.startAdvertising(
+      Advertisement(name: 'aLaStudie Nearby', serviceUUIDs: [serviceUuid]),
+    );
+    isHosting = true;
+  }
+
+  /// Re-advertises this device's last active table after an app interruption.
+  /// The host state is local and never restored onto another account/device.
+  Future<bool> resumeSavedHost() async {
+    final store = LocalStore.current;
+    if (store == null || isHosting || busy) return false;
+    final saved = await store.readJson('nearby:host_snapshot');
+    if (saved is! Map) return false;
+    _setBusy(true);
+    try {
+      await _stopScanning();
+      if (Platform.isAndroid && !await _peripheral.authorize()) {
+        throw StateError(
+          'Bluetooth permission is needed to resume this table.',
+        );
+      }
+      state = saved.cast<String, dynamic>();
+      isHost = true;
+      isConnected = true;
+      await _activateHosting();
+      _startTicker();
+      statusMessage =
+          'Your nearby table is back. Guests can reconnect to this device.';
+      errorMessage = null;
+      _publishState();
+      return true;
+    } catch (error) {
+      errorMessage = _friendlyError(error);
+      notifyListeners();
+      return false;
+    } finally {
+      _setBusy(false);
+    }
+  }
+
+  Future<bool> get hasSavedHostSnapshot async {
+    final saved = await LocalStore.current?.readJson('nearby:host_snapshot');
+    return saved is Map;
+  }
+
+  Future<bool> restoreSavedGuest() async {
+    if (hasSession || isHost) return false;
+    final saved = await LocalStore.current?.readJson('nearby:guest_snapshot');
+    if (saved is! Map) return false;
+    state = saved.cast<String, dynamic>();
+    isHost = false;
+    isConnected = false;
+    statusMessage =
+        'Your last nearby table is saved on this device. Reconnect to the same host to restore its live state.';
+    notifyListeners();
+    return true;
+  }
+
+  Map<String, dynamic> summary() {
+    final session = state['session'] is Map
+        ? (state['session'] as Map).cast<String, dynamic>()
+        : <String, dynamic>{};
+    final focusMinutes =
+        int.tryParse('${session['focus_minutes'] ?? 25}') ?? 25;
+    final completed = int.tryParse('${session['cycles_completed'] ?? 0}') ?? 0;
+    final left = remainingSeconds;
+    final partial = session['phase'] == 'focus'
+        ? (session['status'] == 'running' || session['status'] == 'paused'
+              ? (focusMinutes * 60 - left).clamp(0, focusMinutes * 60)
+              : 0)
+        : 0;
+    return {
+      'clientSessionId': '${state['id'] ?? ''}',
+      'focusedSeconds': completed * focusMinutes * 60 + partial,
+      'completedCycles': completed,
+      'endedAt': DateTime.now().toUtc().toIso8601String(),
+    };
   }
 
   Future<void> startScanning() async {
@@ -191,7 +271,13 @@ class NearbySessionService extends ChangeNotifier {
       await _stopScanning();
       _remotePeripheral = discovery.peripheral;
       _connectedPeripheralId = discovery.peripheral.uuid.toString();
-      _currentMemberId = _newId();
+      final store = LocalStore.current;
+      _currentMemberId =
+          '${await store?.readJson('nearby:client_member_id') ?? ''}';
+      if (_currentMemberId!.isEmpty) {
+        _currentMemberId = _newId();
+        await store?.cacheJson('nearby:client_member_id', _currentMemberId!);
+      }
       await _central.connect(discovery.peripheral);
       final services = await _central.discoverGATT(discovery.peripheral);
       final service = services
@@ -318,6 +404,8 @@ class NearbySessionService extends ChangeNotifier {
     }
     if (!isHost) await _disconnectClient();
     state = {};
+    await LocalStore.current?.removeCache('nearby:host_snapshot');
+    await LocalStore.current?.removeCache('nearby:guest_snapshot');
     isHost = false;
     isHosting = false;
     isConnected = false;
@@ -355,12 +443,11 @@ class NearbySessionService extends ChangeNotifier {
       _tick?.cancel();
       _tick = null;
       isConnected = false;
-      state = {};
       _remotePeripheral = null;
       _remoteCharacteristic = null;
       _connectedPeripheralId = null;
-      _currentMemberId = null;
-      statusMessage = 'The nearby table connection ended.';
+      statusMessage =
+          'Connection paused. Scan for the same host to reconnect and restore this table.';
       notifyListeners();
     }
   }
@@ -575,15 +662,19 @@ class NearbySessionService extends ChangeNotifier {
     if (next['type'] == 'closed') {
       _tick?.cancel();
       _tick = null;
-      state = {};
       isConnected = false;
       statusMessage = 'The host closed the nearby table.';
+      unawaited(
+        LocalStore.current?.removeCache('nearby:guest_snapshot') ??
+            Future.value(),
+      );
       unawaited(_disconnectClient());
       notifyListeners();
       return;
     }
     if (next['type'] == 'snapshot' && next['state'] is Map) {
       state = (next['state'] as Map).cast<String, dynamic>();
+      unawaited(_persistSnapshot());
       isConnected = true;
       if (!isHost && _tick == null) _startTicker();
       notifyListeners();
@@ -591,8 +682,16 @@ class NearbySessionService extends ChangeNotifier {
   }
 
   void _publishState() {
+    unawaited(_persistSnapshot());
     notifyListeners();
     _broadcastSnapshot();
+  }
+
+  Future<void> _persistSnapshot() async {
+    final store = LocalStore.current;
+    if (store == null || state.isEmpty) return;
+    final key = isHost ? 'nearby:host_snapshot' : 'nearby:guest_snapshot';
+    await store.cacheJson(key, _boundedState());
   }
 
   void _broadcastSnapshot() {

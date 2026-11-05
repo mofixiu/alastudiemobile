@@ -381,6 +381,9 @@ class _FakeLocalStore implements LocalStore {
   Future<dynamic> readJson(String key) async => cache[key];
 
   @override
+  Future<void> removeCache(String key) async => cache.remove(key);
+
+  @override
   Future<void> queue(
     String id,
     String kind,

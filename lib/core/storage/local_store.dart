@@ -7,11 +7,13 @@ class LocalStore {
   LocalStore._(this._db);
   final Database _db;
 
+  static LocalStore? current;
+
   static Future<LocalStore> open() async {
     final root = await getDatabasesPath();
     final db = await openDatabase(
       p.join(root, 'alastudie_local.db'),
-      version: 1,
+      version: 2,
       onCreate: (db, _) async {
         await db.execute(
           'CREATE TABLE cache (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)',
@@ -20,8 +22,22 @@ class LocalStore {
           'CREATE TABLE outbox (id TEXT PRIMARY KEY, kind TEXT NOT NULL, path TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL)',
         );
       },
+      onUpgrade: (db, oldVersion, _) async {
+        if (oldVersion < 2) {
+          // v2 keeps the existing cache/outbox intact; durable nearby-session
+          // snapshots and stable peer IDs live in the existing JSON cache.
+          await db.execute(
+            'CREATE TABLE IF NOT EXISTS cache (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)',
+          );
+          await db.execute(
+            'CREATE TABLE IF NOT EXISTS outbox (id TEXT PRIMARY KEY, kind TEXT NOT NULL, path TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL)',
+          );
+        }
+      },
     );
-    return LocalStore._(db);
+    final store = LocalStore._(db);
+    current = store;
+    return store;
   }
 
   Future<void> cacheJson(String key, Object value) async {
@@ -47,6 +63,10 @@ class LocalStore {
     }
   }
 
+  Future<void> removeCache(String key) async {
+    await _db.delete('cache', where: 'key=?', whereArgs: [key]);
+  }
+
   Future<void> queue(
     String id,
     String kind,
@@ -62,8 +82,17 @@ class LocalStore {
     }, conflictAlgorithm: ConflictAlgorithm.ignore);
   }
 
-  Future<List<Map<String, Object?>>> pending() =>
-      _db.query('outbox', orderBy: 'created_at');
+  Future<List<Map<String, Object?>>> pending() async {
+    await _db.delete(
+      'outbox',
+      where: "kind='nearby_summary' AND created_at<?",
+      whereArgs: [
+        DateTime.now().subtract(const Duration(days: 30)).toIso8601String(),
+      ],
+    );
+    return _db.query('outbox', orderBy: 'created_at');
+  }
+
   Future<void> removePending(String id) async {
     await _db.delete('outbox', where: 'id=?', whereArgs: [id]);
   }
@@ -74,7 +103,7 @@ class LocalStore {
       where: 'key<>?',
       whereArgs: ['appearance:dark_mode'],
     );
-    await _db.delete('outbox');
+    await _db.delete('outbox', where: "kind<>'nearby_summary'");
   }
 
   Future<void> close() => _db.close();

@@ -78,6 +78,36 @@ class ApiClient {
         .timeout(const Duration(seconds: 8)),
   );
 
+  Future<Map<String, dynamic>> put(
+    String path,
+    Map<String, dynamic> body,
+  ) async => _decode(
+    await _client
+        .put(
+          Uri.parse('$baseUrl$path'),
+          headers: await _headers(true),
+          body: jsonEncode(body),
+        )
+        .timeout(const Duration(seconds: 12)),
+  );
+
+  Future<List<int>> getBytes(String path) async {
+    final response = await _client
+        .get(Uri.parse('$baseUrl$path'), headers: await _headers(true))
+        .timeout(const Duration(seconds: 20));
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      Map<String, dynamic> body = {};
+      try {
+        body = (jsonDecode(response.body) as Map).cast<String, dynamic>();
+      } catch (_) {}
+      throw ApiException(
+        '${body['error'] ?? 'Could not download this room file.'}',
+        statusCode: response.statusCode,
+      );
+    }
+    return response.bodyBytes;
+  }
+
   Future<Map<String, dynamic>> delete(String path) async => _decode(
     await _client
         .delete(Uri.parse('$baseUrl$path'), headers: await _headers(true))

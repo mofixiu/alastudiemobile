@@ -10,6 +10,7 @@ import '../../core/realtime/realtime_service.dart';
 import '../../core/storage/local_store.dart';
 import '../../core/theme/native_appearance.dart';
 import '../calendar/local_reminder_service.dart';
+import '../nearby/nearby_session_service.dart';
 
 class AppController extends ChangeNotifier {
   AppController({
@@ -28,6 +29,29 @@ class AppController extends ChangeNotifier {
   final OccurrenceReminderScheduler _reminders;
   AppUser? currentUser;
   List<StudyRoom> discoveryRooms = [];
+  List<JsonMap> plannerBlocks = [];
+  int plannerGoal = 3;
+  int plannerCompletedThisWeek = 0;
+  JsonMap matchingPreferences = {
+    'enabled': false,
+    'subjects': [],
+    'courses': [],
+    'availability': [],
+  };
+  List<JsonMap> recommendedRooms = [];
+  List<JsonMap> recommendedPeople = [];
+  List<JsonMap> friends = [];
+  List<JsonMap> friendRequests = [];
+  List<JsonMap> achievements = [];
+  List<JsonMap> weeklyLeaderboard = [];
+  JsonMap leaderboardSettings = {'enabled': false, 'display_name': ''};
+  List<JsonMap> communities = [];
+  JsonMap aiStatus = {'enabled': false};
+  List<JsonMap> personalStudyDocuments = [];
+  String? _personalStudyDocumentsOwnerId;
+  final Map<String, List<JsonMap>> roomMaterials = {};
+  final Map<String, List<JsonMap>> roomNotes = {};
+  final Map<String, JsonMap> roomWhiteboards = {};
   List<StudyRoom> myRooms = [];
   List<JsonMap> calendarOccurrences = [];
   List<JsonMap> roomTemplates = [];
@@ -180,6 +204,13 @@ class AppController extends ChangeNotifier {
           payload['id'] != null) {
         activeSession = StudySession.fromJson(payload.cast<String, dynamic>());
         sessionSeconds = activeSession!.remainingSeconds;
+      } else if (event == 'whiteboard:update' && payload is Map) {
+        final roomId = '${payload['roomId'] ?? ''}';
+        final board = payload['whiteboard'];
+        if (roomId.isNotEmpty && board is Map) {
+          roomWhiteboards[roomId] = board.cast<String, dynamic>();
+          notifyListeners();
+        }
       } else if (event == 'room:removed' &&
           payload is Map &&
           payload['roomId'] == activeRoomId) {
@@ -339,6 +370,11 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> logout() async {
+    final nearby = NearbySessionService.instance;
+    if (nearby.isHost || nearby.isConnected || nearby.isHosting) {
+      await recordNearbySummary(nearby.summary());
+      await nearby.closeSession();
+    }
     if (!previewMode) {
       try {
         await _api.post('/auth/logout');
@@ -349,6 +385,8 @@ class AppController extends ChangeNotifier {
     await _api.clearToken();
     await _local.clearUserCache();
     currentUser = null;
+    personalStudyDocuments = [];
+    _personalStudyDocumentsOwnerId = null;
     previewMode = false;
     activeRoomId = null;
     activeRoom = {};
@@ -375,6 +413,8 @@ class AppController extends ChangeNotifier {
   void enterPreview() {
     previewMode = true;
     currentUser = demoUser;
+    personalStudyDocuments = [];
+    _personalStudyDocumentsOwnerId = demoUser.id;
     discoveryUnavailable = false;
     errorMessage = null;
     discoveryRooms = demoRooms;
@@ -1525,6 +1565,466 @@ class AppController extends ChangeNotifier {
     });
   }
 
+  Future<void> loadPlanner({DateTime? from, DateTime? to}) async {
+    if (currentUser == null || previewMode) return;
+    final start = from ?? DateTime.now().subtract(const Duration(days: 7));
+    final end = to ?? DateTime.now().add(const Duration(days: 21));
+    final query = {
+      'from': start.toUtc().toIso8601String(),
+      'to': end.toUtc().toIso8601String(),
+    };
+    try {
+      final result = await _api.get('/planner/blocks', query: query);
+      plannerBlocks = (result['blocks'] as List? ?? [])
+          .whereType<Map>()
+          .map((row) => row.cast<String, dynamic>())
+          .toList();
+      plannerGoal = int.tryParse('${result['goal'] ?? 3}') ?? 3;
+      plannerCompletedThisWeek =
+          int.tryParse('${result['completedThisWeek'] ?? 0}') ?? 0;
+      await _local.cacheJson('planner:${currentUser!.id}', {
+        'blocks': plannerBlocks,
+        'goal': plannerGoal,
+        'completedThisWeek': plannerCompletedThisWeek,
+      });
+    } catch (_) {
+      final cached = await _local.readJson('planner:${currentUser!.id}');
+      if (cached is Map) {
+        plannerBlocks = (cached['blocks'] as List? ?? [])
+            .whereType<Map>()
+            .map((x) => x.cast<String, dynamic>())
+            .toList();
+        plannerGoal = int.tryParse('${cached['goal'] ?? 3}') ?? 3;
+        plannerCompletedThisWeek =
+            int.tryParse('${cached['completedThisWeek'] ?? 0}') ?? 0;
+      }
+    }
+    notifyListeners();
+  }
+
+  Future<void> setPlannerGoal(int sessionsPerWeek) async {
+    await _roadmapAction(() async {
+      await _api.put('/planner/goal', {'sessionsPerWeek': sessionsPerWeek});
+      plannerGoal = sessionsPerWeek;
+      await loadPlanner();
+    });
+  }
+
+  Future<void> addPlannerBlock({
+    required String title,
+    required String subject,
+    required DateTime startsAt,
+    required DateTime endsAt,
+    required bool reminderEnabled,
+  }) async {
+    await _roadmapAction(() async {
+      var scheduleReminder = reminderEnabled;
+      if (scheduleReminder) {
+        scheduleReminder = await LocalReminderService.instance
+            .requestPermission();
+        if (!scheduleReminder)
+          statusMessage =
+              'The block was saved, but notifications are disabled in device settings.';
+      }
+      final result = await _api.post('/planner/blocks', {
+        'title': title,
+        'subject': subject,
+        'startsAt': startsAt.toUtc().toIso8601String(),
+        'endsAt': endsAt.toUtc().toIso8601String(),
+        'reminderEnabled': scheduleReminder,
+      });
+      final block = (result['block'] as Map).cast<String, dynamic>();
+      await loadPlanner(
+        from: startsAt.subtract(const Duration(days: 7)),
+        to: endsAt.add(const Duration(days: 7)),
+      );
+      if (scheduleReminder)
+        await LocalReminderService.instance.schedulePlannerBlock(block);
+    });
+  }
+
+  Future<void> updatePlannerBlock(
+    String id,
+    Map<String, dynamic> changes,
+  ) async {
+    await _roadmapAction(() async {
+      final result = await _api.patch('/planner/blocks/$id', changes);
+      final block = (result['block'] as Map).cast<String, dynamic>();
+      await loadPlanner();
+      if (block['reminder_enabled'] == true) {
+        await LocalReminderService.instance.schedulePlannerBlock(block);
+      } else {
+        await LocalReminderService.instance.cancelPlannerBlock(id);
+      }
+    });
+  }
+
+  Future<void> deletePlannerBlock(String id) async {
+    await _roadmapAction(() async {
+      await _api.delete('/planner/blocks/$id');
+      await LocalReminderService.instance.cancelPlannerBlock(id);
+      plannerBlocks.removeWhere((block) => '${block['id']}' == id);
+    });
+  }
+
+  Future<void> carryForwardPlannerBlocks(List<JsonMap> copies) async {
+    if (copies.isEmpty) return;
+    await _roadmapAction(() async {
+      await _api.post('/planner/blocks/carry-forward', {'copies': copies});
+      await loadPlanner();
+    });
+  }
+
+  Future<void> loadMatching() async {
+    if (currentUser == null || previewMode) return;
+    try {
+      final result = await _api.get('/matching/preferences');
+      matchingPreferences = (result['preferences'] as Map)
+          .cast<String, dynamic>();
+      await loadRecommendations();
+    } catch (_) {}
+    notifyListeners();
+  }
+
+  Future<void> saveMatchingPreferences({
+    required bool enabled,
+    required List<String> subjects,
+    required List<String> courses,
+    required List<String> availability,
+  }) async {
+    await _roadmapAction(() async {
+      final result = await _api.put('/matching/preferences', {
+        'enabled': enabled,
+        'subjects': subjects,
+        'courses': courses,
+        'availability': availability,
+      });
+      matchingPreferences = (result['preferences'] as Map)
+          .cast<String, dynamic>();
+      await loadRecommendations();
+    });
+  }
+
+  Future<void> loadRecommendations() async {
+    try {
+      final result = await _api.get('/recommendations');
+      recommendedRooms = (result['rooms'] as List? ?? [])
+          .whereType<Map>()
+          .map((x) => x.cast<String, dynamic>())
+          .toList();
+      recommendedPeople = (result['people'] as List? ?? [])
+          .whereType<Map>()
+          .map((x) => x.cast<String, dynamic>())
+          .toList();
+    } catch (_) {
+      recommendedRooms = [];
+      recommendedPeople = [];
+    }
+    notifyListeners();
+  }
+
+  Future<void> loadFriends() async {
+    if (previewMode) return;
+    try {
+      final results = await Future.wait([
+        _api.get('/friends'),
+        _api.get('/friends/requests'),
+      ]);
+      friends = (results[0]['friends'] as List? ?? [])
+          .whereType<Map>()
+          .map((x) => x.cast<String, dynamic>())
+          .toList();
+      friendRequests = (results[1]['requests'] as List? ?? [])
+          .whereType<Map>()
+          .map((x) => x.cast<String, dynamic>())
+          .toList();
+    } catch (_) {}
+    notifyListeners();
+  }
+
+  Future<void> requestFriend(String username) async => _roadmapAction(() async {
+    await _api.post('/friends/requests', {'username': username});
+    await loadFriends();
+  });
+
+  Future<void> respondToFriendRequest(
+    String id, {
+    required bool accept,
+  }) async => _roadmapAction(() async {
+    await _api.patch('/friends/requests/$id', {
+      'action': accept ? 'accept' : 'decline',
+    });
+    await loadFriends();
+  });
+
+  Future<void> removeFriend(String id) async => _roadmapAction(() async {
+    await _api.delete('/friends/$id');
+    friends.removeWhere((item) => '${item['id']}' == id);
+  });
+
+  Future<void> loadProgress() async {
+    if (previewMode) return;
+    try {
+      final values = await Future.wait([
+        _api.get('/achievements'),
+        _api.get('/leaderboard/settings'),
+        _api.get('/leaderboard/weekly'),
+      ]);
+      achievements = (values[0]['achievements'] as List? ?? [])
+          .whereType<Map>()
+          .map((x) => x.cast<String, dynamic>())
+          .toList();
+      leaderboardSettings = (values[1]['settings'] as Map)
+          .cast<String, dynamic>();
+      weeklyLeaderboard = (values[2]['entries'] as List? ?? [])
+          .whereType<Map>()
+          .map((x) => x.cast<String, dynamic>())
+          .toList();
+    } catch (_) {}
+    notifyListeners();
+  }
+
+  Future<void> setLeaderboard({
+    required bool enabled,
+    required String displayName,
+  }) async => _roadmapAction(() async {
+    final result = await _api.put('/leaderboard/settings', {
+      'enabled': enabled,
+      'displayName': displayName,
+    });
+    leaderboardSettings = (result['settings'] as Map).cast<String, dynamic>();
+    await loadProgress();
+  });
+
+  Future<void> loadRoomResources(String roomId) async {
+    try {
+      final result = await Future.wait([
+        _api.get('/rooms/$roomId/materials'),
+        _api.get('/rooms/$roomId/notes'),
+        _api.get('/rooms/$roomId/whiteboard'),
+      ]);
+      roomMaterials[roomId] = (result[0]['materials'] as List? ?? [])
+          .whereType<Map>()
+          .map((x) => x.cast<String, dynamic>())
+          .toList();
+      roomNotes[roomId] = (result[1]['notes'] as List? ?? [])
+          .whereType<Map>()
+          .map((x) => x.cast<String, dynamic>())
+          .toList();
+      roomWhiteboards[roomId] =
+          (result[2]['whiteboard'] as Map?)?.cast<String, dynamic>() ??
+          {'strokes': [], 'version': 0};
+    } catch (_) {}
+    notifyListeners();
+  }
+
+  Future<void> shareRoomMaterial(
+    String roomId, {
+    required String title,
+    required String fileName,
+    required String contentType,
+    required List<int> bytes,
+  }) async => _roadmapAction(() async {
+    await _api.post('/rooms/$roomId/materials', {
+      'title': title,
+      'fileName': fileName,
+      'contentType': contentType,
+      'dataBase64': base64Encode(bytes),
+    });
+    await loadRoomResources(roomId);
+  });
+
+  Future<List<int>> downloadRoomMaterial(String roomId, String materialId) =>
+      _api.getBytes('/rooms/$roomId/materials/$materialId/download');
+
+  Future<void> deleteRoomMaterial(String roomId, String materialId) async =>
+      _roadmapAction(() async {
+        await _api.delete('/rooms/$roomId/materials/$materialId');
+        await loadRoomResources(roomId);
+      });
+
+  Future<void> createRoomNote(String roomId, String title, String body) async =>
+      _roadmapAction(() async {
+        await _api.post('/rooms/$roomId/notes', {'title': title, 'body': body});
+        await loadRoomResources(roomId);
+      });
+
+  Future<void> saveRoomNote(
+    String roomId,
+    JsonMap note,
+    String title,
+    String body,
+  ) async => _roadmapAction(() async {
+    await _api.patch('/rooms/$roomId/notes/${note['id']}', {
+      'version': note['version'],
+      'title': title,
+      'body': body,
+    });
+    await loadRoomResources(roomId);
+  });
+
+  Future<void> deleteRoomNote(String roomId, String noteId) async =>
+      _roadmapAction(() async {
+        await _api.delete('/rooms/$roomId/notes/$noteId');
+        await loadRoomResources(roomId);
+      });
+
+  Future<void> saveRoomWhiteboard(
+    String roomId,
+    List<JsonMap> strokes,
+    int version,
+  ) async => _roadmapAction(() async {
+    final result = await _api.put('/rooms/$roomId/whiteboard', {
+      'strokes': strokes,
+      'version': version,
+    });
+    roomWhiteboards[roomId] = (result['whiteboard'] as Map)
+        .cast<String, dynamic>();
+  });
+
+  Future<void> loadCommunities() async {
+    try {
+      final result = await _api.get('/communities');
+      communities = (result['communities'] as List? ?? [])
+          .whereType<Map>()
+          .map((x) => x.cast<String, dynamic>())
+          .toList();
+    } catch (_) {}
+    notifyListeners();
+  }
+
+  Future<void> requestSchoolEmail(String email) async =>
+      _roadmapAction(() async {
+        await _api.post('/communities/school-email/request', {'email': email});
+      });
+
+  Future<void> verifySchoolEmail(String email, String code) async =>
+      _roadmapAction(() async {
+        await _api.post('/communities/school-email/verify', {
+          'email': email,
+          'code': code,
+        });
+        await loadCommunities();
+      });
+
+  Future<void> joinCommunity(String id) async => _roadmapAction(() async {
+    await _api.post('/communities/$id/join');
+    await loadCommunities();
+  });
+
+  Future<void> inviteCommunityMember(String id, String username) async =>
+      _roadmapAction(() async {
+        await _api.post('/communities/$id/invites', {'username': username});
+      });
+
+  Future<void> createInstitution(String name, String domain) async =>
+      _roadmapAction(() async {
+        await _api.post('/admin/institutions', {
+          'name': name,
+          'domain': domain,
+        });
+        await loadCommunities();
+      });
+
+  Future<void> loadAiStatus() async {
+    try {
+      aiStatus = await _api.get('/ai/status');
+    } catch (_) {
+      aiStatus = {'enabled': false};
+    }
+    notifyListeners();
+  }
+
+  Future<void> loadPersonalStudyDocuments() async {
+    final ownerId = currentUser?.id;
+    if (_personalStudyDocumentsOwnerId != ownerId) {
+      personalStudyDocuments = [];
+      _personalStudyDocumentsOwnerId = ownerId;
+    }
+    if (ownerId == null || previewMode) {
+      notifyListeners();
+      return;
+    }
+    try {
+      final result = await _api.get('/study-documents');
+      if (currentUser?.id != ownerId || previewMode) return;
+      personalStudyDocuments = (result['documents'] as List? ?? [])
+          .whereType<Map>()
+          .map((x) => x.cast<String, dynamic>())
+          .toList();
+    } catch (_) {}
+    notifyListeners();
+  }
+
+  Future<void> uploadPersonalStudyDocument({
+    required String fileName,
+    required List<int> bytes,
+  }) async => _roadmapAction(() async {
+    await _api.post('/study-documents', {
+      'fileName': fileName,
+      'contentType': 'application/pdf',
+      'dataBase64': base64Encode(bytes),
+    });
+    await loadPersonalStudyDocuments();
+  });
+
+  Future<List<int>> downloadPersonalStudyDocument(String documentId) =>
+      _api.getBytes('/study-documents/$documentId/download');
+
+  Future<void> deletePersonalStudyDocument(String documentId) async =>
+      _roadmapAction(() async {
+        await _api.delete('/study-documents/$documentId');
+        await loadPersonalStudyDocuments();
+      });
+
+  Future<JsonMap> askAi({
+    required String operation,
+    required String prompt,
+    String? roomId,
+    List<String> materialIds = const [],
+    List<String> studyDocumentIds = const [],
+    bool includePlan = false,
+  }) async => _api.post('/ai/requests', {
+    'operation': operation,
+    'prompt': prompt,
+    'roomId': roomId,
+    'materialIds': materialIds,
+    'studyDocumentIds': studyDocumentIds,
+    'includePlan': includePlan,
+    // The AI screen tells the user both of these before they submit.
+    'confirmGoogleProcessing': true,
+    'confirmPersistentIndex': materialIds.isNotEmpty || studyDocumentIds.isNotEmpty,
+  });
+
+  Future<void> removeAiIndex(String materialId) async {
+    await _api.delete('/ai/material-index/$materialId');
+  }
+
+  Future<void> recordNearbySummary(JsonMap summary) async {
+    final id = '${summary['clientSessionId'] ?? ''}';
+    if (id.isEmpty || currentUser == null || previewMode) return;
+    final queuedPayload = {...summary, '_ownerId': currentUser!.id};
+    try {
+      await _api.post('/offline/summaries', summary);
+    } catch (_) {
+      await _local.queue(
+        'nearby-$id',
+        'nearby_summary',
+        '/offline/summaries',
+        queuedPayload,
+      );
+    }
+  }
+
+  Future<void> _roadmapAction(Future<void> Function() action) async {
+    if (previewMode) {
+      statusMessage = 'Connect the local API to use this feature.';
+      notifyListeners();
+      return;
+    }
+    await _withBusy(action);
+  }
+
   Future<List<JsonMap>> loadSessionHistory() async {
     loadingHistory = true;
     notifyListeners();
@@ -1872,7 +2372,11 @@ class AppController extends ChangeNotifier {
         final path = item['path']! as String;
         final payload = (jsonDecode(item['payload']! as String) as Map)
             .cast<String, dynamic>();
-        if (item['kind'] == 'post') {
+        if (item['kind'] == 'post' || item['kind'] == 'nearby_summary') {
+          if (item['kind'] == 'nearby_summary') {
+            if (payload['_ownerId'] != currentUser?.id) continue;
+            payload.remove('_ownerId');
+          }
           await _api.post(path, payload);
           if (RegExp(r'^/rooms/[^/]+/messages$').hasMatch(path)) {
             messagesChanged = true;

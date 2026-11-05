@@ -9,6 +9,7 @@ import '../../shared/widgets/ui.dart';
 import '../app/app_controller.dart';
 import '../home/dashboard_screen.dart';
 import '../nearby/nearby_study_screen.dart';
+import '../roadmap/roadmap_screen.dart';
 
 class DiscoverScreen extends StatefulWidget {
   const DiscoverScreen({super.key});
@@ -131,6 +132,57 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
                     ),
                   ),
                   const SizedBox(height: 19),
+                  GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: () => Navigator.push(
+                      context,
+                      aLaStudieRoute(
+                        context: context,
+                        builder: (_) => const RoadmapScreen(),
+                      ),
+                    ),
+                    child: SoftPanel(
+                      color: context.appSurface,
+                      padding: const EdgeInsets.all(13),
+                      child: Row(
+                        children: [
+                          Container(
+                            width: 42,
+                            height: 42,
+                            decoration: BoxDecoration(
+                              color: context.appBrandPanel,
+                              borderRadius: BorderRadius.circular(14),
+                            ),
+                            child: AppIcon(
+                              Icons.group_add_outlined,
+                              size: 17,
+                              color: context.appBrandInk,
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          const Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Eyebrow('OPT-IN MATCHING'),
+                                SizedBox(height: 3),
+                                Text(
+                                  'Find your study people',
+                                  style: TextStyle(fontWeight: FontWeight.w900),
+                                ),
+                              ],
+                            ),
+                          ),
+                          const AppIcon(
+                            Icons.arrow_forward_rounded,
+                            size: 17,
+                            color: AppColors.red,
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 14),
                   TextField(
                     controller: search,
                     onChanged: (value) {

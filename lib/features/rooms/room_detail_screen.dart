@@ -9,6 +9,7 @@ import '../../core/models/app_models.dart';
 import '../../core/theme/app_theme.dart';
 import '../../shared/widgets/ui.dart';
 import '../app/app_controller.dart';
+import 'room_resources_screen.dart';
 
 class RoomDetailScreen extends StatefulWidget {
   const RoomDetailScreen({super.key, required this.roomId});
@@ -107,7 +108,51 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
                           color: context.appMuted,
                         ),
                       ),
-                      const SizedBox(height: 19),
+                      const SizedBox(height: 12),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: OutlinedButton.icon(
+                              onPressed: () => Navigator.push(
+                                context,
+                                aLaStudieRoute(
+                                  context: context,
+                                  builder: (_) => RoomResourcesScreen(
+                                    roomId: widget.roomId,
+                                    roomTitle: title,
+                                  ),
+                                ),
+                              ),
+                              icon: const AppIcon(
+                                Icons.folder_open_outlined,
+                                size: 15,
+                              ),
+                              label: const Text('Room library'),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: OutlinedButton.icon(
+                              onPressed: () => Navigator.push(
+                                context,
+                                aLaStudieRoute(
+                                  context: context,
+                                  builder: (_) => RoomWhiteboardScreen(
+                                    roomId: widget.roomId,
+                                    roomTitle: title,
+                                  ),
+                                ),
+                              ),
+                              icon: const AppIcon(
+                                Icons.draw_outlined,
+                                size: 15,
+                              ),
+                              label: const Text('Whiteboard'),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 16),
                       _SessionCard(app: app),
                       const SizedBox(height: 22),
                       Row(

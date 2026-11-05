@@ -100,7 +100,7 @@ class LocalReminderService implements OccurrenceReminderScheduler {
         title: '${occurrence['room_title'] ?? 'Study room'} is coming up',
         body:
             'Your study-room meeting starts ${_relativeStart(startsAt, now)}.',
-        scheduledDate: timezone.TZDateTime.from(triggerAt, timezone.local),
+        scheduledDate: timezone.TZDateTime.from(triggerAt, timezone.UTC),
         notificationDetails: const NotificationDetails(
           android: AndroidNotificationDetails(
             'study_room_reminders',
@@ -116,6 +116,57 @@ class LocalReminderService implements OccurrenceReminderScheduler {
         payload: 'occurrence:${occurrence['id']}',
       );
     }
+  }
+
+  Future<void> schedulePlannerBlock(Map<String, dynamic> block) async {
+    await initialize();
+    final id = _plannerReminderId('${block['id'] ?? ''}');
+    final startsAt = DateTime.tryParse('${block['starts_at'] ?? ''}')?.toUtc();
+    if (block['reminder_enabled'] != true ||
+        startsAt == null ||
+        !startsAt.isAfter(DateTime.now().toUtc())) {
+      await _plugin.cancel(id: id);
+      return;
+    }
+    final reminderAt = startsAt.subtract(const Duration(minutes: 10));
+    final trigger = reminderAt.isAfter(DateTime.now().toUtc())
+        ? reminderAt
+        : DateTime.now().toUtc().add(const Duration(minutes: 1));
+    if (!startsAt.isAfter(trigger)) {
+      await _plugin.cancel(id: id);
+      return;
+    }
+    await _plugin.zonedSchedule(
+      id: id,
+      title: '${block['title'] ?? 'Study block'} is coming up',
+      body: 'Your private study block starts in about 10 minutes.',
+      scheduledDate: timezone.TZDateTime.from(trigger, timezone.UTC),
+      notificationDetails: const NotificationDetails(
+        android: AndroidNotificationDetails(
+          'planner_block_reminders',
+          'Planner reminders',
+          channelDescription: 'Reminders for private weekly study blocks.',
+          importance: Importance.defaultImportance,
+          priority: Priority.defaultPriority,
+        ),
+        iOS: DarwinNotificationDetails(),
+      ),
+      androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
+      payload: 'planner:${block['id']}',
+    );
+  }
+
+  Future<void> cancelPlannerBlock(String blockId) async {
+    await initialize();
+    await _plugin.cancel(id: _plannerReminderId(blockId));
+  }
+
+  int _plannerReminderId(String value) {
+    var hash = 0x45d9f3b;
+    for (final unit in value.codeUnits) {
+      hash = ((hash << 5) - hash + unit) & 0x3fffffff;
+    }
+    return 1_000_000_000 + hash;
   }
 
   @override

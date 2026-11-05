@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../../core/theme/app_theme.dart';
+import '../../core/models/app_models.dart';
 import '../../shared/widgets/ui.dart';
 import '../app/app_controller.dart';
 
@@ -29,10 +30,16 @@ class _CalendarScreenState extends State<CalendarScreen> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
         unawaited(
-          context.read<AppController>().loadCalendar(
-            from: _monthStart,
-            to: _nextMonthStart,
-          ),
+          Future.wait([
+            context.read<AppController>().loadCalendar(
+              from: _monthStart,
+              to: _nextMonthStart,
+            ),
+            context.read<AppController>().loadPlanner(
+              from: _monthStart,
+              to: _nextMonthStart,
+            ),
+          ]),
         );
       }
     });
@@ -45,7 +52,12 @@ class _CalendarScreenState extends State<CalendarScreen> {
         _visibleMonth.month + amount,
       );
     });
-    unawaited(app.loadCalendar(from: _monthStart, to: _nextMonthStart));
+    unawaited(
+      Future.wait([
+        app.loadCalendar(from: _monthStart, to: _nextMonthStart),
+        app.loadPlanner(from: _monthStart, to: _nextMonthStart),
+      ]),
+    );
   }
 
   @override
@@ -59,6 +71,21 @@ class _CalendarScreenState extends State<CalendarScreen> {
                   DateTime.tryParse('${b['starts_at']}') ?? DateTime(2100),
                 ),
           );
+        final planner =
+            app.plannerBlocks.where((block) {
+              final starts = DateTime.tryParse(
+                '${block['starts_at'] ?? ''}',
+              )?.toLocal();
+              return starts != null &&
+                  starts.isAfter(
+                    _monthStart.subtract(const Duration(seconds: 1)),
+                  ) &&
+                  starts.isBefore(_nextMonthStart);
+            }).toList()..sort(
+              (a, b) => DateTime.parse(
+                '${a['starts_at']}',
+              ).compareTo(DateTime.parse('${b['starts_at']}')),
+            );
         return CupertinoPageScaffold(
           backgroundColor: context.appPaper,
           child: SafeArea(
@@ -69,8 +96,12 @@ class _CalendarScreenState extends State<CalendarScreen> {
               ),
               slivers: [
                 BrandRefreshSliver(
-                  onRefresh: () =>
+                  onRefresh: () async {
+                    await Future.wait([
                       app.loadCalendar(from: _monthStart, to: _nextMonthStart),
+                      app.loadPlanner(from: _monthStart, to: _nextMonthStart),
+                    ]);
+                  },
                 ),
                 BrandGlassSliverBar(
                   leading: _CalendarIconAction(
@@ -91,6 +122,21 @@ class _CalendarScreenState extends State<CalendarScreen> {
                     children: [
                       const _CalendarHero(),
                       const SizedBox(height: 14),
+                      _PlannerOverview(
+                        goal: app.plannerGoal,
+                        completed: app.plannerCompletedThisWeek,
+                        blocks: planner,
+                        onAdd: () => _addPlannerBlock(context, app),
+                        onGoal: () => _chooseGoal(context, app),
+                        onCarryForward: () => _carryForward(context, app),
+                        onToggle: (block, completed) => app.updatePlannerBlock(
+                          '${block['id']}',
+                          {'completed': completed},
+                        ),
+                        onDelete: (block) =>
+                            app.deletePlannerBlock('${block['id']}'),
+                      ),
+                      const SizedBox(height: 15),
                       SoftPanel(
                         padding: const EdgeInsets.symmetric(
                           horizontal: 7,
@@ -896,3 +942,393 @@ String _monthName(int month) => const [
   'November',
   'December',
 ][month - 1];
+
+class _PlannerOverview extends StatelessWidget {
+  const _PlannerOverview({
+    required this.goal,
+    required this.completed,
+    required this.blocks,
+    required this.onAdd,
+    required this.onGoal,
+    required this.onCarryForward,
+    required this.onToggle,
+    required this.onDelete,
+  });
+  final int goal;
+  final int completed;
+  final List<JsonMap> blocks;
+  final VoidCallback onAdd;
+  final VoidCallback onGoal;
+  final VoidCallback onCarryForward;
+  final void Function(JsonMap, bool) onToggle;
+  final void Function(JsonMap) onDelete;
+
+  @override
+  Widget build(BuildContext context) => SoftPanel(
+    padding: const EdgeInsets.all(15),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            const Expanded(child: SectionHeading('My private study plan')),
+            IconButton(
+              onPressed: onAdd,
+              tooltip: 'Add a study block',
+              icon: const AppIcon(
+                Icons.add_circle_outline_rounded,
+                size: 19,
+                color: AppColors.red,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 6),
+        Row(
+          children: [
+            Expanded(
+              child: Text(
+                '$completed of $goal sessions this week',
+                style: TextStyle(
+                  color: context.appMuted,
+                  fontWeight: FontWeight.w700,
+                  fontSize: 12,
+                ),
+              ),
+            ),
+            TextButton(onPressed: onGoal, child: const Text('Goal')),
+          ],
+        ),
+        ClipRRect(
+          borderRadius: BorderRadius.circular(4),
+          child: LinearProgressIndicator(
+            value: goal <= 0 ? 0 : (completed / goal).clamp(0, 1),
+            minHeight: 4,
+            backgroundColor: context.appLine,
+            color: AppColors.red,
+          ),
+        ),
+        const SizedBox(height: 11),
+        if (blocks.isEmpty)
+          Text(
+            'Private blocks appear here alongside room meetings.',
+            style: TextStyle(color: context.appMuted, fontSize: 12),
+          )
+        else
+          for (final block in blocks)
+            _PlannerBlockRow(
+              block: block,
+              onToggle: onToggle,
+              onDelete: onDelete,
+            ),
+        if (blocks.isNotEmpty)
+          Align(
+            alignment: Alignment.centerRight,
+            child: TextButton.icon(
+              onPressed: onCarryForward,
+              icon: const AppIcon(Icons.content_copy_rounded, size: 15),
+              label: const Text('Copy selected blocks to next week'),
+            ),
+          ),
+      ],
+    ),
+  );
+}
+
+class _PlannerBlockRow extends StatelessWidget {
+  const _PlannerBlockRow({
+    required this.block,
+    required this.onToggle,
+    required this.onDelete,
+  });
+  final JsonMap block;
+  final void Function(JsonMap, bool) onToggle;
+  final void Function(JsonMap) onDelete;
+
+  @override
+  Widget build(BuildContext context) {
+    final start = DateTime.tryParse('${block['starts_at'] ?? ''}')?.toLocal();
+    final end = DateTime.tryParse('${block['ends_at'] ?? ''}')?.toLocal();
+    final completed = block['completed_at'] != null;
+    String time(DateTime? value) => value == null
+        ? ''
+        : '${value.hour.toString().padLeft(2, '0')}:${value.minute.toString().padLeft(2, '0')}';
+    return Padding(
+      padding: const EdgeInsets.only(top: 7),
+      child: Row(
+        children: [
+          GestureDetector(
+            onTap: () => onToggle(block, !completed),
+            child: AppIcon(
+              completed ? Icons.check_circle_rounded : Icons.circle_outlined,
+              size: 17,
+              color: completed ? AppColors.red : context.appMuted,
+            ),
+          ),
+          const SizedBox(width: 9),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '${block['title'] ?? 'Study block'}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontWeight: FontWeight.w800,
+                    decoration: completed ? TextDecoration.lineThrough : null,
+                  ),
+                ),
+                Text(
+                  '${time(start)}${end == null ? '' : ' – ${time(end)}'}${'${block['subject'] ?? ''}'.isEmpty ? '' : ' · ${block['subject']}'}',
+                  style: TextStyle(fontSize: 11, color: context.appMuted),
+                ),
+              ],
+            ),
+          ),
+          if (block['reminder_enabled'] == true)
+            const AppIcon(
+              Icons.notifications_active_outlined,
+              size: 15,
+              color: AppColors.red,
+            ),
+          IconButton(
+            visualDensity: VisualDensity.compact,
+            onPressed: () => onDelete(block),
+            tooltip: 'Delete block',
+            icon: const AppIcon(Icons.close_rounded, size: 15),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _PlannerDraft {
+  const _PlannerDraft(
+    this.title,
+    this.subject,
+    this.startsAt,
+    this.endsAt,
+    this.reminder,
+  );
+  final String title;
+  final String subject;
+  final DateTime startsAt;
+  final DateTime endsAt;
+  final bool reminder;
+}
+
+Future<void> _addPlannerBlock(BuildContext context, AppController app) async {
+  final title = TextEditingController();
+  final subject = TextEditingController();
+  final minimum = alignDateTimeToMinuteInterval(
+    value: DateTime.now().add(const Duration(minutes: 5)),
+    minimum: DateTime.now().add(const Duration(minutes: 5)),
+    maximum: DateTime.now().add(const Duration(days: 730)),
+  );
+  var start = minimum;
+  var reminder = false;
+  final draft = await showPremiumBottomSheet<_PlannerDraft>(
+    context: context,
+    builder: (sheetContext) => StatefulBuilder(
+      builder: (context, setSheetState) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 10, 20, 22),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Eyebrow('PRIVATE TO YOUR ACCOUNT'),
+              const SizedBox(height: 6),
+              Text(
+                'Plan a study block',
+                style: Theme.of(context).textTheme.headlineMedium,
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: title,
+                maxLength: 90,
+                onChanged: (_) => setSheetState(() {}),
+                decoration: const InputDecoration(
+                  labelText: 'What will you study?',
+                ),
+              ),
+              TextField(
+                controller: subject,
+                maxLength: 60,
+                decoration: const InputDecoration(
+                  labelText: 'Subject or course (optional)',
+                ),
+              ),
+              SizedBox(
+                height: 150,
+                child: CupertinoDatePicker(
+                  mode: CupertinoDatePickerMode.dateAndTime,
+                  initialDateTime: start,
+                  minimumDate: minimum,
+                  maximumDate: DateTime.now().add(const Duration(days: 730)),
+                  minuteInterval: 5,
+                  onDateTimeChanged: (value) =>
+                      setSheetState(() => start = value),
+                ),
+              ),
+              Row(
+                children: [
+                  const Expanded(child: Text('Remind me 10 minutes before')),
+                  CupertinoSwitch(
+                    value: reminder,
+                    activeTrackColor: AppColors.red,
+                    onChanged: (value) => setSheetState(() => reminder = value),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              PrimaryAction(
+                label: 'Add to my calendar',
+                icon: Icons.event_available_rounded,
+                onPressed: title.text.trim().isEmpty
+                    ? null
+                    : () => Navigator.pop(
+                        sheetContext,
+                        _PlannerDraft(
+                          title.text.trim(),
+                          subject.text.trim(),
+                          start,
+                          start.add(const Duration(minutes: 60)),
+                          reminder,
+                        ),
+                      ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    ),
+  );
+  title.dispose();
+  subject.dispose();
+  if (draft == null) return;
+  await app.addPlannerBlock(
+    title: draft.title,
+    subject: draft.subject,
+    startsAt: draft.startsAt,
+    endsAt: draft.endsAt,
+    reminderEnabled: draft.reminder,
+  );
+  if (context.mounted)
+    showAppMessage(context, app.errorMessage ?? 'Private study block added.');
+}
+
+Future<void> _chooseGoal(BuildContext context, AppController app) async {
+  var selected = app.plannerGoal;
+  final result = await showPremiumBottomSheet<int>(
+    context: context,
+    builder: (sheetContext) => StatefulBuilder(
+      builder: (context, setState) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(18, 8, 18, 18),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Eyebrow('A PACE YOU CAN KEEP'),
+              Text(
+                'Weekly session goal',
+                style: Theme.of(context).textTheme.headlineMedium,
+              ),
+              SizedBox(
+                height: 150,
+                child: CupertinoPicker(
+                  itemExtent: 36,
+                  scrollController: FixedExtentScrollController(
+                    initialItem: selected - 1,
+                  ),
+                  onSelectedItemChanged: (index) =>
+                      setState(() => selected = index + 1),
+                  children: [
+                    for (var count = 1; count <= 21; count++)
+                      Center(child: Text('$count sessions')),
+                  ],
+                ),
+              ),
+              PrimaryAction(
+                label: 'Save weekly goal',
+                icon: Icons.check_rounded,
+                onPressed: () => Navigator.pop(sheetContext, selected),
+              ),
+            ],
+          ),
+        ),
+      ),
+    ),
+  );
+  if (result != null) await app.setPlannerGoal(result);
+}
+
+Future<void> _carryForward(BuildContext context, AppController app) async {
+  final blocks = app.plannerBlocks
+      .where((block) => block['completed_at'] == null)
+      .toList();
+  final selected = <String>{};
+  final result = await showPremiumBottomSheet<bool>(
+    context: context,
+    builder: (sheetContext) => StatefulBuilder(
+      builder: (context, setState) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(18, 8, 18, 18),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Eyebrow('CHOOSE WHAT REPEATS'),
+              Text(
+                'Copy to next week',
+                style: Theme.of(context).textTheme.headlineMedium,
+              ),
+              const SizedBox(height: 9),
+              for (final block in blocks)
+                CheckboxListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  activeColor: AppColors.red,
+                  value: selected.contains('${block['id']}'),
+                  title: Text('${block['title']}'),
+                  subtitle: Text('${block['subject'] ?? ''}'),
+                  onChanged: (value) => setState(
+                    () => value == true
+                        ? selected.add('${block['id']}')
+                        : selected.remove('${block['id']}'),
+                  ),
+                ),
+              PrimaryAction(
+                label: 'Copy ${selected.length} blocks',
+                icon: Icons.content_copy_rounded,
+                onPressed: selected.isEmpty
+                    ? null
+                    : () => Navigator.pop(sheetContext, true),
+              ),
+            ],
+          ),
+        ),
+      ),
+    ),
+  );
+  if (result != true) return;
+  final copies = blocks
+      .where((block) => selected.contains('${block['id']}'))
+      .map((block) {
+        final start = DateTime.parse(
+          '${block['starts_at']}',
+        ).toLocal().add(const Duration(days: 7));
+        final end = DateTime.parse(
+          '${block['ends_at']}',
+        ).toLocal().add(const Duration(days: 7));
+        return <String, dynamic>{
+          'blockId': block['id'],
+          'startsAt': start.toUtc().toIso8601String(),
+          'endsAt': end.toUtc().toIso8601String(),
+        };
+      })
+      .toList();
+  await app.carryForwardPlannerBlocks(copies);
+}

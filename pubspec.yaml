@@ -40,6 +40,9 @@ dependencies:
   bluetooth_low_energy: ^6.2.1
   flutter_local_notifications: ^22.3.1
   timezone: ^0.11.0
+  file_picker: ^10.3.10
+  open_filex: ^4.7.0
+  path_provider: ^2.1.6
 
 dev_dependencies:
   flutter_test:
@@ -59,6 +62,9 @@ dev_dependencies:
 flutter:
 
   uses-material-design: true
+
+  assets:
+    - assets/icons/dazzle/
 
   fonts:
     - family: Montserrat

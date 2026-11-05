@@ -7,6 +7,8 @@ import '../../core/theme/app_theme.dart';
 import '../../shared/widgets/ui.dart';
 import '../app/app_controller.dart';
 import '../settings/settings_screen.dart';
+import '../roadmap/roadmap_screen.dart';
+import '../roadmap/ai_tools_screen.dart';
 
 class ProfileScreen extends StatefulWidget {
   const ProfileScreen({super.key});
@@ -133,6 +135,40 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   index: 4,
                   distance: 8,
                   child: _WeeklyFocusCard(stats: app.stats),
+                ),
+                const SizedBox(height: 13),
+                SoftPanel(
+                  color: context.appSurface,
+                  child: Column(
+                    children: [
+                      _ProfileLink(
+                        icon: Icons.groups_outlined,
+                        title: 'Study connections & progress',
+                        subtitle:
+                            'Matching, friends, badges and the opt-in leaderboard',
+                        onTap: () => Navigator.push(
+                          context,
+                          aLaStudieRoute(
+                            context: context,
+                            builder: (_) => const RoadmapScreen(),
+                          ),
+                        ),
+                      ),
+                      Divider(color: context.appLine, height: 17),
+                      _ProfileLink(
+                        icon: Icons.auto_awesome_outlined,
+                        title: 'AI study tools',
+                        subtitle: 'Ask, quiz, or draft a plan when enabled',
+                        onTap: () => Navigator.push(
+                          context,
+                          aLaStudieRoute(
+                            context: context,
+                            builder: (_) => const AiToolsScreen(),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
                 const SizedBox(height: 22),
                 OneShotReveal(
@@ -617,6 +653,47 @@ class _ProfileScreenState extends State<ProfileScreen> {
       ),
     );
   }
+}
+
+class _ProfileLink extends StatelessWidget {
+  const _ProfileLink({
+    required this.icon,
+    required this.title,
+    required this.subtitle,
+    required this.onTap,
+  });
+  final IconData icon;
+  final String title;
+  final String subtitle;
+  final VoidCallback onTap;
+  @override
+  Widget build(BuildContext context) => GestureDetector(
+    behavior: HitTestBehavior.opaque,
+    onTap: onTap,
+    child: Row(
+      children: [
+        AppIcon(icon, size: 19, color: context.appBrandInk),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(title, style: const TextStyle(fontWeight: FontWeight.w900)),
+              Text(
+                subtitle,
+                style: TextStyle(color: context.appMuted, fontSize: 10),
+              ),
+            ],
+          ),
+        ),
+        const AppIcon(
+          Icons.arrow_forward_rounded,
+          size: 17,
+          color: AppColors.red,
+        ),
+      ],
+    ),
+  );
 }
 
 class _WeeklyFocusCard extends StatelessWidget {
